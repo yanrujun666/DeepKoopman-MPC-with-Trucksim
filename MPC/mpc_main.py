@@ -1,5 +1,5 @@
 """
-DDK-MPC主控制程序
+DeepEDMD-MPC主控制程序
 替代MATLAB的DDK_mpc_main_DCSUV_50ms.m
 """
 
@@ -12,7 +12,7 @@ from typing import Optional
 import time
 
 # 导入控制器
-from ddk_controller import DDK, MPCController
+from ddk_controller import DeepEDMD, MPCController
 
 # 注意：此文件主要用于批量测试，实际Simulink集成请使用 ddk_mpc_sfunction.py
 
@@ -26,7 +26,7 @@ class MPCMain:
         
         Args:
             root_path: 项目根路径
-            param_path: DDK模型参数文件路径
+            param_path: DeepEDMD模型参数文件路径（必须是.pth格式）
         """
         self.root_path = Path(root_path)
         self.param_path = param_path
@@ -55,18 +55,26 @@ class MPCMain:
         # 转矩增量：0.5（归一化后），转向角增量：0.2（归一化后）
         self.delta_umax = np.array([0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.2, 0.2, 0.2, 0.2, 0.2, 0.2])
         
-        # 初始化DDK模型
-        print(f"加载DDK模型: {param_path}")
-        self.ddk = DDK(param_path)
+        # 初始化DeepEDMD模型
+        print(f"加载DeepEDMD模型: {param_path}")
+        self.deepedmd = DeepEDMD(param_path)
+        
+        # 时间步长配置
+        # DeepEDMD模型的时间步长：0.01s（10ms）
+        # MPC采样时间：sample_interval * 0.01s
+        model_dt = 0.01  # 模型时间步长（秒）
+        mpc_dt = float(self.sample_interval) * model_dt  # MPC采样时间（秒）
         
         # 初始化MPC控制器
         self.mpc = MPCController(
-            self.ddk, 
+            self.deepedmd, 
             Np=self.Np, 
             Nc=self.Nc,
             Q=self.tempQ,
             R=self.RTimes,
-            delta_umax=self.delta_umax
+            delta_umax=self.delta_umax,
+            model_dt=model_dt,
+            mpc_dt=mpc_dt
         )
         
         # 注意：如需通过MATLAB Engine运行Simulink，请自行实现
@@ -316,8 +324,8 @@ def main():
     """主函数"""
     # 配置路径（需要根据实际情况修改）
     root_path = r"D:\YRJ_Workspace\DDK-Trucksim-python\MPC"
-    # TODO: 更新为Trucksim参数文件路径（待DDK模型训练完成后）
-    param_path = r"D:\YRJ_Workspace\DDK-Trucksim-python\MPC\params_for_matlab_Trucksim.mat"  # 待定
+    # TODO: 更新为Trucksim参数文件路径（必须是.pth格式）
+    param_path = r"D:\YRJ_Workspace\DDK-Trucksim-python\DeepEDMD\ckpt\DeepEDMD-Transv2-hd16-multiset-100e.pth"  # 待定
     
     # 检查文件是否存在
     if not os.path.exists(param_path):

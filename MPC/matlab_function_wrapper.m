@@ -11,8 +11,9 @@
 
 function control_output = ddk_mpc_matlab_function(state_input)
 %#codegen
-% DDK-MPC控制器MATLAB Function包装器（Trucksim版本）
+% DeepEDMD-MPC控制器MATLAB Function包装器（Trucksim版本）
 % 支持12维控制输出（6个转向角 + 6个转矩）
+% 仅支持.pth格式模型文件
 %
 % 输入:
 %   state_input: [6x1] 车辆状态 [X(m), Y(m), Yaw(rad), vx(m/s), vy(m/s), yaw_rate(rad/s)]
@@ -47,22 +48,16 @@ if isempty(is_initialized)
     is_initialized = false;
     
     % 设置路径（根据实际情况修改）
-    % 支持两种模型格式：
-    % 1. PyTorch模型（.pth格式）：推荐，使用Transformer编码器
-    %    示例：'D:\YRJ_Workspace\DDK-Trucksim-python\ckpt\DeepEDMD-Transv2-hd16-multiset-100e.pth'
-    % 2. MATLAB模型（.mat/.pkl格式）：向后兼容
-    %    示例：'D:\YRJ_Workspace\DDK-Trucksim-python\MPC\params_for_matlab_Trucksim.mat'
+    % 仅支持PyTorch模型（.pth格式），使用Transformer编码器
+    % 示例：'D:\YRJ_Workspace\DDK-Trucksim-python\DeepEDMD\ckpt\DeepEDMD-Transv2-hd16-multiset-100e.pth'
     
-    % TODO: 更新为Trucksim参数文件路径
-    % PyTorch模型示例（推荐）：
+    % TODO: 更新为Trucksim参数文件路径（必须是.pth格式）
     param_path = 'D:\YRJ_Workspace\DDK-Trucksim-python\DeepEDMD\ckpt\DeepEDMD-Transv2-hd16-multiset-100e-remote.pth';
-    % MATLAB模型示例（向后兼容）：
-    % param_path = 'D:\YRJ_Workspace\DDK-Trucksim-python\MPC\params_for_matlab_Trucksim.mat';
     
     % TODO: 更新为Trucksim参考轨迹数据文件路径
     % 数据文件应包含 'position' 和 'velocity' 字段（或 'Pos' 和 'X' 字段）
     % data_path = 'D:\YRJ_Workspace\DDK-Trucksim-python\MPC\ref_trajectory\snake_trajectory_ref.mat';
-    data_path = 'D:\YRJ_Workspace\DDK-Trucksim-python\MPC\ref_trajectory\straight_acceleration_trajectory_ref.mat'
+    data_path = 'D:\YRJ_Workspace\DDK-Trucksim-python\MPC\ref_trajectory\straight_acceleration_trajectory_ref.mat';
     
     % 初始化Python控制器
     % 参数：param_path, data_path, Np=30, Nc=30, sample_interval=5

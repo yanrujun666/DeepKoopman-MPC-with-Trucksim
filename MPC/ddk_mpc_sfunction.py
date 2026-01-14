@@ -29,18 +29,18 @@ if _module_dir not in sys.path:
 
 # 导入MPC控制器
 try:
-    from ddk_controller import DDK, MPCController
+    from ddk_controller import DeepEDMD, MPCController
 except ImportError:
     # 如果导入失败，再次尝试添加路径
     current_dir = os.path.dirname(os.path.abspath(__file__))
     if current_dir not in sys.path:
         sys.path.insert(0, current_dir)
-    from ddk_controller import DDK, MPCController
+    from ddk_controller import DeepEDMD, MPCController
 
 
 # 全局状态（在S-Function调用之间保持）
 _controller_state = {
-    'ddk': None,
+    'deepedmd': None,
     'mpc': None,
     'ref_traj': None,
     'u_prev': np.zeros(12),  # 12维控制：6个转矩 + 6个转向角（归一化后）
@@ -79,7 +79,7 @@ def initialize_controller(param_path, data_path, Np=30, Nc=30, sample_interval=5
     初始化MPC控制器
     
     Args:
-        param_path: DDK模型参数文件路径
+        param_path: DeepEDMD模型参数文件路径（必须是.pth格式）
         data_path: 参考数据文件路径
         Np: 预测时域
         Nc: 控制时域
@@ -91,8 +91,8 @@ def initialize_controller(param_path, data_path, Np=30, Nc=30, sample_interval=5
     print(f"  参数文件: {param_path}")
     print(f"  数据文件: {data_path}")
     
-    # 加载DDK模型
-    _controller_state['ddk'] = DDK(param_path)
+    # 加载DeepEDMD模型
+    _controller_state['deepedmd'] = DeepEDMD(param_path)
     
     # 创建MPC控制器
     # Trucksim控制维度为12维（6个转矩+6个转向角）
@@ -104,13 +104,21 @@ def initialize_controller(param_path, data_path, Np=30, Nc=30, sample_interval=5
     # 转矩增量：0.5（归一化后），转向角增量：0.2（归一化后）
     delta_umax = np.array([0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.2, 0.2, 0.2, 0.2, 0.2, 0.2])
     
+    # 时间步长配置
+    # DeepEDMD模型的时间步长：0.01s（10ms）
+    # MPC采样时间：sample_interval * 0.01s
+    model_dt = 0.01  # 模型时间步长（秒）
+    mpc_dt = float(sample_interval) * model_dt  # MPC采样时间（秒）
+    
     _controller_state['mpc'] = MPCController(
-        _controller_state['ddk'],
+        _controller_state['deepedmd'],
         Np=Np,
         Nc=Nc,
         Q=Q,
         R=R,
-        delta_umax=delta_umax
+        delta_umax=delta_umax,
+        model_dt=model_dt,
+        mpc_dt=mpc_dt
     )
     
     # 启用跟踪误差打印（在需要时动态控制）
@@ -346,13 +354,13 @@ def compute_control(state_input):
     global _controller_state
     
     # 如果控制器未初始化，返回零控制（避免抛出异常，因为MATLAB代码生成不支持try-catch）
-    if _controller_state['ddk'] is None:
+    if _controller_state['deepedmd'] is None:
         print("[Python S-Function] Warning: Controller not initialized, returning zero control")
         # 返回列向量（12x1），确保MATLAB能正确接收
         return np.zeros(12).reshape(12, 1)
     
     try:
-        ddk = _controller_state['ddk']
+        deepedmd = _controller_state['deepedmd']
         mpc = _controller_state['mpc']
         ref_traj = _controller_state['ref_traj']
         
@@ -502,15 +510,13 @@ def compute_control(state_input):
             print(f"[Python S-Function] 错误：参考轨迹格式不正确，形状={temp_refr.shape}")
             return np.zeros(12).reshape(12, 1)
         
-        # 处理参考轨迹
-        ref_pos_0 = temp_refr[0, :3]  # 提取第一行的前3列作为参考位置
-        ref_r = ddk.get_reference(temp_refr, ref_pos_0)
+        # 使用全局坐标（模型在全局坐标系中训练，不需要坐标变换）
+        # 直接使用全局参考轨迹，不进行坐标变换
+        ref_r = temp_refr.copy()
         
-        # 归一化和编码
-        # 对于PyTorch模型，normalization只做坐标变换，不归一化（编码器内部有BatchNorm）
-        # 对于MATLAB模型，normalization做坐标变换和归一化
-        x_normalized = ddk.normalization(x_cur, ref_pos_0)
-        x_lift = ddk.encoder(x_normalized)
+        # 直接使用全局状态进行编码（不进行坐标变换）
+        # 模型在全局坐标系中训练，编码器内部有BatchNorm
+        x_lift = deepedmd.encoder(x_cur)
         
         # 求解MPC（仅在需要时打印跟踪误差）
         print_tracking_error = (idx <= 10 or idx % 100 == 0)
@@ -519,15 +525,10 @@ def compute_control(state_input):
         
         if success:
             # 更新控制量：u_new = u_prev + delta_u
-            # 对于PyTorch模型：u_prev是归一化的控制输入（0到1之间，使用CONTROL_MIN/MAX归一化）
-            # 对于MATLAB模型：u_prev是归一化的控制输入（-1到1之间）
+            # u_prev是归一化的控制输入（0到1之间，使用CONTROL_MIN/MAX归一化）
             u_new = _controller_state['u_prev'] + delta_u
-            if ddk.model_type == 'pytorch':
-                # PyTorch模型：归一化范围[0, 1]
-                u_clipped = np.clip(u_new, 0.0, 1.0)
-            else:
-                # MATLAB模型：归一化范围[-1, 1]
-                u_clipped = np.clip(u_new, -1.0, 1.0)
+            # 归一化范围[0, 1]
+            u_clipped = np.clip(u_new, 0.0, 1.0)
             _controller_state['u_prev'] = u_clipped
             
         else:

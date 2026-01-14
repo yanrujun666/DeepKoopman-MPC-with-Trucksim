@@ -1,0 +1,50 @@
+================================================================================
+MPC Solving Process Analysis Report
+================================================================================
+
+1. Input Information
+--------------------------------------------------------------------------------
+Vehicle state: X=0.0000m, Y=0.0000m, Yaw=0.0000deg
+Velocity: vx=5.0000m/s, vy=0.0000m/s, yaw_rate=0.0000deg/s
+Reference trajectory index: 1
+Previous control input: [0. 0. 0. 0. 0. 0. 0. 0. 0. 0. 0. 0.]
+
+2. Reference Trajectory Extraction (Global Coordinates)
+--------------------------------------------------------------------------------
+Number of extracted reference points: 3
+First reference point (global): X=0.0500m, Y=0.0000m, Yaw=0.0000deg
+
+3. State (Global Coordinates)
+--------------------------------------------------------------------------------
+Global state (no transformation): [0. 0. 0. 5. 0. 0.]
+
+4. State Encoding
+--------------------------------------------------------------------------------
+Lifted state dimension: 16
+Lifted state: [ 0.        0.        0.        5.        0.        0.        0.142339  0.685111  0.632196  0.977681  0.719882
+ -1.188328  0.269019 -0.999279  0.935688 -0.985382]
+
+5. QP Problem Construction
+--------------------------------------------------------------------------------
+Tracking error norm: 0.460194
+Average error by dimension: [0.25462  0.066496 0.001962 0.005409 0.005192 0.000063]
+Gradient vector f statistics: mean=-0.011069, max=0.048709
+
+6. Numerical Diagnostics
+--------------------------------------------------------------------------------
+H matrix condition number: 1.00e+02
+H matrix minimum eigenvalue: 1.000001e+00
+THETA matrix norm: 2.03e-01
+THETA matrix condition number: 1.28e+03
+A_ext maximum eigenvalue magnitude: 1.00301716
+  Warning: A_ext matrix may be unstable!
+
+7. QUADPROG Solving Results
+--------------------------------------------------------------------------------
+Solve status: solved
+Solve time: 0.0000s
+Iterations: 79
+Objective value: 0.000000
+Control increment: [0.000001 0.000001 0.000001 0.000001 0.000001 0.000001 0.000001 0.000001 0.000001 0.000001 0.000001 0.000001]
+Actual control output: [  -89.99982   -89.99982   -89.99982   -89.99982   -89.99982   -89.99982 -1499.997   -1499.997   -1499.997
+ -1499.997   -1499.997   -1499.997  ]

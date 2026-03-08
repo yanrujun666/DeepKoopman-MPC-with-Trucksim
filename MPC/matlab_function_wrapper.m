@@ -56,6 +56,7 @@ if isempty(is_initialized)
     
     % TODO: 更新为Trucksim参考轨迹数据文件路径
     % 数据文件应包含 'position' 和 'velocity' 字段（或 'Pos' 和 'X' 字段）
+    % data_path = "D:\YRJ_Workspace\DDK-Trucksim-python\TrucksimDatasets\all\all_wheel_steer_Scenario_snake_acc_5m_s.mat";
     % data_path = 'D:\YRJ_Workspace\DDK-Trucksim-python\MPC\ref_trajectory\snake_trajectory_ref.mat';
     data_path = 'D:\YRJ_Workspace\DDK-Trucksim-python\MPC\ref_trajectory\straight_acceleration_trajectory_ref.mat';
     
@@ -65,6 +66,9 @@ if isempty(is_initialized)
     % Nc: 控制时域（步数）
     % sample_interval: 采样间隔（用于参考轨迹提取）
     py.ddk_mpc_sfunction.initialize_controller(param_path, data_path, 30, 30, 5);
+    % 为避免Python侧全局状态在多次仿真间残留，初始化后显式重置一次状态
+    % 重要：Python侧u_prev为“归一化控制”，应以0.5作为零转矩/零转角的初始值
+    py.ddk_mpc_sfunction.reset_controller();
     is_initialized = true;
 end
 

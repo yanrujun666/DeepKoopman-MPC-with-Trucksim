@@ -43,10 +43,20 @@ _controller_state = {
     'deepedmd': None,
     'mpc': None,
     'ref_traj': None,
-    'u_prev': np.zeros(12),  # 12维控制：6个转矩 + 6个转向角（归一化后）
+    # 注意：控制量采用CONTROL_MIN/MAX做min-max归一化
+    # 因此 u=0.5 对应“零转矩/零转角”（区间中心），u=0 对应最小转矩/最小转角
+    'u_prev': 0.5 * np.ones(12),  # 12维控制：前6转矩 + 后6转向角（归一化后）
     'nearest_idx': 1,
     'start_idx': 1,
+    # index: Python侧调用计数（当前Simulink/Trucksim为1ms步长，会非常快）
     'index': 0,
+    # mpc_step: 实际MPC更新计数（按目标采样周期，例如50ms）
+    'mpc_step': 0,
+    # 控制抽取倍率：每 decimation 次调用才真正执行一次MPC求解
+    # 例如：仿真步长1ms、MPC采样50ms，则 decimation=50
+    'decimation': 50,
+    # 上一次输出（用于零阶保持），格式为(12,1)
+    'last_control_output': np.zeros(12).reshape(12, 1),
     'bad_count': 0,
     'last_state': None,
     'sample_interval': 5,
@@ -74,7 +84,7 @@ def find_nearest_point(ref_traj, current_state, start_idx, search_range):
     return nearest_idx, min_distance
 
 
-def initialize_controller(param_path, data_path, Np=30, Nc=30, sample_interval=5):
+def initialize_controller(param_path, data_path, Np=30, Nc=30, sample_interval=5, decimation=50):
     """
     初始化MPC控制器
     
@@ -96,13 +106,35 @@ def initialize_controller(param_path, data_path, Np=30, Nc=30, sample_interval=5
     
     # 创建MPC控制器
     # Trucksim控制维度为12维（6个转矩+6个转向角）
-    Q = np.diag([20, 1000, 1000, 1000, 20, 20])  # 状态权重（6维，保持不变）
-    # R矩阵：12维控制权重
-    # 转矩权重较小（允许较大变化），转向角权重较大（限制变化）
-    R = np.diag([5, 5, 5, 5, 5, 5, 10000, 10000, 10000, 10000, 10000, 10000])
-    # delta_umax：12维控制增量约束
-    # 转矩增量：0.5（归一化后），转向角增量：0.2（归一化后）
-    delta_umax = np.array([0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.2, 0.2, 0.2, 0.2, 0.2, 0.2])
+    # ========= 调参（更平顺：速度优先 + 转矩更平滑）=========
+    # Q：状态跟踪权重（6维：[X, Y, Yaw, vx, vy, yaw_rate]）
+    # - 速度(vx)优先，但避免极端大权重导致饱和
+    Q = np.diag([20, 80, 120, 300, 40, 40])
+    # ========= 将控制增量降维到2维： [delta_torque_scalar, delta_front_steer_scalar] =========
+    # 说明：
+    # - MPC内部求解的变量维度为2（扭矩标量 + 前轮转角标量）
+    # - 通过 B_ 将2维增量映射回12维增量（与训练数据集执行器结构一致）：
+    #   torques(6)=delta_torque
+    #   steer: LF/RF=+delta_steer, LM/RM=0, LR/RR=-delta_steer
+    B_delta = np.array(
+        [[1, 0],
+         [1, 0],
+         [1, 0],
+         [1, 0],
+         [1, 0],
+         [1, 0],
+         [0, 1],
+         [0, 1],
+         [0, 0],
+         [0, 0],
+         [0, -1],
+         [0, -1]], dtype=float
+    )
+
+    # R：控制增量权重（2维：[torque_scalar, steer_scalar]）
+    R = np.diag([800, 12000])
+    # delta_umax：2维控制单步增量上限（归一化）
+    delta_umax = np.array([0.05, 0.02])
     
     # 时间步长配置
     # DeepEDMD模型的时间步长：0.01s（10ms）
@@ -118,7 +150,8 @@ def initialize_controller(param_path, data_path, Np=30, Nc=30, sample_interval=5
         R=R,
         delta_umax=delta_umax,
         model_dt=model_dt,
-        mpc_dt=mpc_dt
+        mpc_dt=mpc_dt,
+        control_delta_mapping=B_delta
     )
     
     # 启用跟踪误差打印（在需要时动态控制）
@@ -308,17 +341,28 @@ def initialize_controller(param_path, data_path, Np=30, Nc=30, sample_interval=5
     _controller_state['Np'] = int(Np)
     _controller_state['Nc'] = int(Nc)
     _controller_state['sample_interval'] = int(sample_interval)
+    _controller_state['decimation'] = int(decimation)
     
     # 重置所有状态变量（重要：确保每次初始化都从干净状态开始）
     # 注意：如果之前运行过仿真，Python模块的全局状态会被保留
     # 因此必须在初始化时重置所有状态，否则index会从上次的值继续累加
     old_index = _controller_state['index']  # 记录旧值用于调试
-    _controller_state['u_prev'] = np.zeros(12)  # 12维控制（归一化后）
+    # 初始归一化控制：0.5 对应零转矩/零转角
+    _controller_state['u_prev'] = 0.5 * np.ones(12)
     _controller_state['nearest_idx'] = 1
     _controller_state['start_idx'] = 1
     _controller_state['index'] = 0
+    _controller_state['mpc_step'] = 0
     _controller_state['bad_count'] = 0
     _controller_state['last_state'] = None
+
+    # 初始化零阶保持输出（避免非更新步返回空值）
+    try:
+        _controller_state['last_control_output'] = _controller_state['mpc'].convert_to_control_output(
+            _controller_state['u_prev']
+        ).reshape(12, 1)
+    except Exception:
+        _controller_state['last_control_output'] = np.zeros(12).reshape(12, 1)
     
     if old_index > 0:
         print(f"[Python S-Function] 警告：检测到之前的状态 (index={old_index})，已重置为0")
@@ -331,6 +375,7 @@ def initialize_controller(param_path, data_path, Np=30, Nc=30, sample_interval=5
     
     print(f"[Python S-Function] 初始化完成")
     print(f"  参考轨迹长度: {ref_traj_len}, Np={Np}, Nc={Nc}, sample_interval={sample_interval}")
+    print(f"  控制抽取倍率: decimation={_controller_state['decimation']} (每{_controller_state['decimation']}次调用求解一次MPC)")
     print(f"  推荐仿真时间: {recommended_sim_time:.1f}秒")
     
     return True
@@ -382,24 +427,38 @@ def compute_control(state_input):
             float(state_arr[5])                     # yaw_rate (rad/s) - 已经是国际标准单位
         ])
         
+        # 1ms调用计数
         _controller_state['index'] += 1
-        idx = _controller_state['index']
-        
-        # 打印输入信息（前10步或每100步）
-        if idx <= 10 or idx % 100 == 0:
-            print(f"\n[MPC输入] Step {idx}:")
+        call_idx = int(_controller_state['index'])
+
+        # ====== 50ms门控：仅每 decimation 次调用求解一次MPC，其余时间零阶保持 ======
+        decimation = int(_controller_state.get('decimation', 50))
+        if decimation <= 0:
+            decimation = 50
+
+        do_solve = ((call_idx - 1) % decimation == 0)
+        if not do_solve:
+            # 非MPC更新步：直接返回上一次控制输出（零阶保持）
+            return _controller_state.get('last_control_output', np.zeros(12).reshape(12, 1))
+
+        # MPC更新计数（用于打印“Step”）
+        _controller_state['mpc_step'] = int(_controller_state.get('mpc_step', 0)) + 1
+        mpc_step = int(_controller_state['mpc_step'])
+
+        # 打印输入信息（前10个MPC步或每100个MPC步）
+        if mpc_step <= 10 or mpc_step % 100 == 0:
+            print(f"\n[MPC输入] Step {mpc_step}:")
             print(f"  车辆状态: X={x_cur[0]:.4f}m, Y={x_cur[1]:.4f}m, Yaw={x_cur[2]*180/np.pi:.4f}°")
             print(f"  速度: vx={x_cur[3]:.4f}m/s, vy={x_cur[4]:.4f}m/s, yaw_rate={x_cur[5]*180/np.pi:.4f}°/s")
-            nearest_idx = int(_controller_state['nearest_idx'])
-            print(f"  参考轨迹索引: nearest_idx={nearest_idx}, 轨迹长度={len(ref_traj)}")
-            # 输出参考轨迹索引对应的状态和速度
-            if 0 <= nearest_idx < len(ref_traj):
-                ref_state = ref_traj[nearest_idx, :]
+            nearest_idx_dbg = int(_controller_state['nearest_idx'])
+            print(f"  参考轨迹索引: nearest_idx={nearest_idx_dbg}, 轨迹长度={len(ref_traj)}")
+            if 0 <= nearest_idx_dbg < len(ref_traj):
+                ref_state = ref_traj[nearest_idx_dbg, :]
                 print(f"  参考状态: X={ref_state[0]:.4f}m, Y={ref_state[1]:.4f}m, Yaw={ref_state[2]*180/np.pi:.4f}°")
                 print(f"  参考速度: vx={ref_state[3]:.4f}m/s, vy={ref_state[4]:.4f}m/s, yaw_rate={ref_state[5]*180/np.pi:.4f}°/s")
         
-        # 初始化最近点索引
-        if idx == 2:
+        # 初始化最近点索引（在第1个MPC步做一次全局搜索）
+        if mpc_step == 1:
             _controller_state['start_idx'], _ = find_nearest_point(
                 ref_traj, x_cur, 1, len(ref_traj)
             )
@@ -519,37 +578,39 @@ def compute_control(state_input):
         x_lift = deepedmd.encoder(x_cur)
         
         # 求解MPC（仅在需要时打印跟踪误差）
-        print_tracking_error = (idx <= 10 or idx % 100 == 0)
+        print_tracking_error = (mpc_step <= 10 or mpc_step % 100 == 0)
         mpc._print_tracking_error = print_tracking_error
-        delta_u, success = mpc.solve(x_lift, _controller_state['u_prev'], ref_r)
+        # MPC内部已将控制增量降维到2维（通过control_delta_mapping映射回12维）
+        # 这里直接传入全12维u_prev（归一化），solve返回2维delta_u
+        delta_u_2, success = mpc.solve(x_lift, _controller_state['u_prev'], ref_r)
         
         if success:
-            # 更新控制量：u_new = u_prev + delta_u
-            # u_prev是归一化的控制输入（0到1之间，使用CONTROL_MIN/MAX归一化）
-            u_new = _controller_state['u_prev'] + delta_u
-            # 归一化范围[0, 1]
-            u_clipped = np.clip(u_new, 0.0, 1.0)
-            _controller_state['u_prev'] = u_clipped
+            # 更新全12维控制：u_new_full = u_prev_full + B_u_map * delta_u_2
+            delta_u_full = mpc.B_u_map @ delta_u_2
+            u_new = _controller_state['u_prev'] + delta_u_full
+            _controller_state['u_prev'] = np.clip(u_new, 0.0, 1.0)
             
         else:
             print(f"[Python S-Function] Warning: MPC求解失败，保持上一时刻控制")
         
         # 转换为实际控制指令（使用统一方法）
         control_output = mpc.convert_to_control_output(_controller_state['u_prev'])
+        # 缓存控制输出（用于后续49个非更新步的零阶保持）
+        _controller_state['last_control_output'] = control_output.reshape(12, 1)
         
         # 打印控制信息（前10步或每100步）
-        if idx <= 10 or idx % 100 == 0:
-            print(f"[MPC控制] Step {idx}:")
+        if mpc_step <= 10 or mpc_step % 100 == 0:
+            print(f"[MPC控制] Step {mpc_step}:")
             u_prev_str = ', '.join([f"{_controller_state['u_prev'][i]:.4f}" for i in range(12)])
-            delta_u_str = ', '.join([f"{delta_u[i]:.4f}" for i in range(12)])
+            delta_u_str = ', '.join([f"{delta_u_2[i]:.4f}" for i in range(len(delta_u_2))])
             print(f"  归一化控制: u_prev=[{u_prev_str}]")
-            print(f"  控制增量: delta_u=[{delta_u_str}]")
+            print(f"  控制增量(delta_u_2): [{delta_u_str}]")
             print(f"  实际控制: steer_LF={control_output[0]:.3f}°,steer_RF={control_output[1]:.3f}°,steer_LM={control_output[2]:.3f}°,steer_RM={control_output[3]:.3f}°,steer_LR={control_output[4]:.3f}°,steer_RR={control_output[5]:.3f}°, \
                 torque_LF={control_output[6]:.2f}N·m, torque_RF={control_output[7]:.2f}N·m, torque_LM={control_output[8]:.2f}N·m, torque_RM={control_output[9]:.2f}N·m, torque_LR={control_output[10]:.2f}N·m, torque_RR={control_output[11]:.2f}N·m")
             print(f"  求解状态: {'成功' if success else '失败'}")
         
         # 返回列向量（12x1），确保MATLAB能正确接收
-        return control_output.reshape(12, 1)
+        return _controller_state['last_control_output']
     
     except Exception as e:
         # 如果发生任何错误，返回零控制（避免MATLAB代码生成问题）
@@ -561,12 +622,23 @@ def compute_control(state_input):
 def reset_controller():
     """重置控制器状态"""
     global _controller_state
-    _controller_state['u_prev'] = np.zeros(12)  # 12维控制
+    # 初始归一化控制：0.5 对应零转矩/零转角
+    _controller_state['u_prev'] = 0.5 * np.ones(12)
     _controller_state['nearest_idx'] = 1
     _controller_state['start_idx'] = 1
     _controller_state['index'] = 0
+    _controller_state['mpc_step'] = 0
     _controller_state['bad_count'] = 0
     _controller_state['last_state'] = None
+    try:
+        if _controller_state.get('mpc') is not None:
+            _controller_state['last_control_output'] = _controller_state['mpc'].convert_to_control_output(
+                _controller_state['u_prev']
+            ).reshape(12, 1)
+        else:
+            _controller_state['last_control_output'] = np.zeros(12).reshape(12, 1)
+    except Exception:
+        _controller_state['last_control_output'] = np.zeros(12).reshape(12, 1)
     print("[Python S-Function] 控制器状态已重置")
 
 

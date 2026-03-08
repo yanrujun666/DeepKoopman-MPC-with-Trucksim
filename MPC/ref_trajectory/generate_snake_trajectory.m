@@ -20,57 +20,55 @@ vx_final = 15;          % 最终x方向速度（m/s）
 A = 3;                  % y方向振幅（米）
 omega = 0.4;            % 蛇形频率（rad/s）
 acceleration = (vx_final - vx0) / T_total;  % x方向加速度（m/s^2）
+Ay = A / 2;             % 为保证y最大幅值仍为A，使用 Ay*(1-cos) 形式（最大=2*Ay=A）
 
 % 初始化数组
 position = struct('x', zeros(N, 1), 'y', zeros(N, 1), 'yaw', zeros(N, 1));
 velocity = struct('vx', zeros(N, 1), 'vy', zeros(N, 1), 'wz', zeros(N, 1));
 
-% 生成轨迹
+% 说明：
+% - 位置(x,y)在全局坐标系中生成
+% - yaw 使用全局速度方向（轨迹切线方向）计算
+% - vx/vy 输出为“自车坐标系（车体坐标系）”速度：
+%   vx: 车体纵向速度，vy: 车体横向速度
+%   这样可与TruckSim常见输出（车体VX/VY）一致，避免坐标系不一致导致跟踪发散
+
+% 先生成全局速度分量（用于计算yaw、wz），再旋转到车体坐标系
+vx_global = zeros(N, 1);
+vy_global = zeros(N, 1);
+
+% 生成轨迹（位置 + 全局速度）
 for i = 1:N
     % x方向：加速运动
     % x(t) = vx0*t + 0.5*a*t^2
     position.x(i) = vx0 * t(i) + 0.5 * acceleration * t(i)^2;
     
-    % y方向：蛇形（正弦波）
-    % y(t) = A * sin(omega * t)
-    position.y(i) = A * sin(omega * t(i));
+% y方向：蛇形（使用 1-cos 形式保证初值平滑）
+% 目的：t=0 时 y=0、dy/dt=0、yaw=0，避免一开始出现较大的航向角阶跃
+% y(t) = Ay * (1 - cos(omega * t))
+position.y(i) = Ay * (1 - cos(omega * t(i)));
     
-    % x方向速度：线性加速
-    velocity.vx(i) = vx0 + acceleration * t(i);
+    % 全局x方向速度：线性加速
+    vx_global(i) = vx0 + acceleration * t(i);
     
-    % y方向速度：对y求导
-    % vy = dy/dt = A * omega * cos(omega * t)
-    velocity.vy(i) = A * omega * cos(omega * t(i));
+% 全局y方向速度：对y求导
+% vy_global = dy/dt = Ay * omega * sin(omega * t)
+vy_global(i) = Ay * omega * sin(omega * t(i));
     
     % 航向角yaw：根据速度方向计算
-    % yaw = atan2(vy, vx)
-    position.yaw(i) = atan2(velocity.vy(i), velocity.vx(i));
-    
-    % 角速度wz：对yaw求导
-    if i > 1
-        % 使用数值微分计算角速度
-        dyaw = position.yaw(i) - position.yaw(i-1);
-        % 处理角度跳变（-pi到pi）
-        if dyaw > pi
-            dyaw = dyaw - 2*pi;
-        elseif dyaw < -pi
-            dyaw = dyaw + 2*pi;
-        end
-        velocity.wz(i) = dyaw / dt;
-    else
-        velocity.wz(i) = 0;
-    end
+    % yaw = atan2(vy_global, vx_global)
+    position.yaw(i) = atan2(vy_global(i), vx_global(i));
 end
 
-% 更精确的wz计算（使用解析方法）
+% 更精确的wz计算（使用解析方法，基于全局速度分量）
 % wz = d(yaw)/dt = d(atan2(vy, vx))/dt
 % 使用导数公式：d(atan2(y,x))/dt = (x*dy/dt - y*dx/dt) / (x^2 + y^2)
 for i = 1:N
-    vx = velocity.vx(i);
-    vy = velocity.vy(i);
-    % vy对t的导数：d(vy)/dt = -A*omega^2*sin(omega*t)
-    dvy_dt = -A * omega^2 * sin(omega * t(i));
-    % vx对t的导数：d(vx)/dt = acceleration
+    vx = vx_global(i);
+    vy = vy_global(i);
+% vy_global对t的导数：d(vy_global)/dt = Ay*omega^2*cos(omega*t)
+dvy_dt = Ay * omega^2 * cos(omega * t(i));
+    % vx_global对t的导数：d(vx_global)/dt = acceleration
     dvx_dt = acceleration;
     
     % 计算wz
@@ -79,6 +77,16 @@ for i = 1:N
     else
         velocity.wz(i) = 0;
     end
+end
+
+% 将全局速度旋转到车体坐标系，作为最终输出的 vx/vy
+% 车体坐标系定义：x轴沿车头方向（yaw），y轴向左
+% [vx_body; vy_body] = R(-yaw) * [vx_global; vy_global]
+for i = 1:N
+    cy = cos(position.yaw(i));
+    sy = sin(position.yaw(i));
+    velocity.vx(i) =  cy * vx_global(i) + sy * vy_global(i);   % 纵向速度
+    velocity.vy(i) = -sy * vx_global(i) + cy * vy_global(i);   % 横向速度
 end
 
 % 创建参考轨迹结构体
@@ -136,8 +144,8 @@ plot(t, velocity.vx, 'r-', 'LineWidth', 1.5); hold on;
 plot(t, velocity.vy, 'b-', 'LineWidth', 1.5);
 xlabel('时间 (s)');
 ylabel('速度 (m/s)');
-title('速度随时间变化');
-legend('vx', 'vy', 'Location', 'best');
+title('车体坐标系速度随时间变化');
+legend('vx (body)', 'vy (body)', 'Location', 'best');
 grid on;
 
 % 子图5：角速度随时间变化
@@ -154,7 +162,7 @@ v_total = sqrt(velocity.vx.^2 + velocity.vy.^2);
 plot(t, v_total, 'k-', 'LineWidth', 1.5);
 xlabel('时间 (s)');
 ylabel('合速度 (m/s)');
-title('合速度随时间变化');
+title('车体速度合成量随时间变化');
 grid on;
 
 sgtitle('蛇形参考轨迹分析', 'FontSize', 14, 'FontWeight', 'bold');

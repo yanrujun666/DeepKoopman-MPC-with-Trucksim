@@ -812,11 +812,12 @@ class MPCController:
     实现MPC优化求解
     """
     
-    def __init__(self, deepedmd: DeepEDMD, Np: int = 30, Nc: int = 30, 
+    def __init__(self, deepedmd: DeepEDMD, Np: int = 30, Nc: int = 30,
                  Q: Optional[np.ndarray] = None, R: Optional[np.ndarray] = None,
                  delta_umax: Optional[np.ndarray] = None,
                  model_dt: float = 0.01, mpc_dt: Optional[float] = None,
-                 sample_interval: Optional[int] = None):
+                 sample_interval: Optional[int] = None,
+                 control_delta_mapping: Optional[np.ndarray] = None):
         """
         初始化MPC控制器
         
@@ -835,7 +836,23 @@ class MPCController:
         self.Np = int(Np)  # 确保是整数（预测时域）
         self.Nc = int(Nc)  # 确保是整数（控制时域）
         self.Nx = int(deepedmd.space_dim)  # 提升空间维度，确保是整数
-        self.Nu = int(deepedmd.u_dim)      # 控制输入维度，确保是整数（使用u_dim别名）
+        # 全量控制维度（用于u_prev进入扩展状态、以及绝对u约束）
+        self.Nu_full = int(deepedmd.u_dim)  # 12
+
+        # 增量控制输入映射：将低维 delta_u_opt 映射到 12维 delta_u_full
+        # 形状: (Nu_full, Nu_opt)
+        if control_delta_mapping is not None:
+            self.B_u_map = np.array(control_delta_mapping, dtype=float)
+            if self.B_u_map.ndim != 2 or self.B_u_map.shape[0] != self.Nu_full:
+                raise ValueError(f"control_delta_mapping维度错误，期望({self.Nu_full}, Nu_opt)，实际{self.B_u_map.shape}")
+            self.Nu_opt = int(self.B_u_map.shape[1])
+        else:
+            self.B_u_map = np.eye(self.Nu_full, dtype=float)
+            self.Nu_opt = self.Nu_full
+
+        # 兼容旧代码：self.Nu 现在表示“优化变量维度”（原先是12维）
+        # 旧实现里大量使用 self.Nu 来表示 delta_u 的维度
+        self.Nu = self.Nu_opt
         
         # 时间步长参数
         self.model_dt = float(model_dt)  # 模型时间步长（默认0.01s）
@@ -866,17 +883,31 @@ class MPCController:
         if Q is None:
             Q = np.diag([20, 1000, 1000, 1000, 20, 20])  # 默认Q矩阵（6维状态）
         if R is None:
-            # 默认R矩阵（12维控制：6个转矩 + 6个转向角）
-            # 转矩权重较小（允许较大变化），转向角权重较大（限制变化）
-            R = np.diag([5, 5, 5, 5, 5, 5, 10000, 10000, 10000, 10000, 10000, 10000])
+            # 默认R矩阵（对 delta_u_opt 加权）
+            # 若降维到2维：[torque_scalar, steer_scalar]，则R应为2x2
+            if self.Nu_opt == 2:
+                R = np.diag([800, 12000])
+            else:
+                # 12维控制：6个转矩 + 6个转向角（增量权重）
+                R = np.diag([5, 5, 5, 5, 5, 5, 10000, 10000, 10000, 10000, 10000, 10000])
         if delta_umax is None:
-            # 默认控制增量约束（12维）
-            # 转矩增量：0.5（归一化后），转向角增量：0.2（归一化后）
-            delta_umax = np.array([0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.2, 0.2, 0.2, 0.2, 0.2, 0.2])
+            # 默认控制增量约束（对 delta_u_opt）
+            if self.Nu_opt == 2:
+                delta_umax = np.array([0.05, 0.02])
+            else:
+                # 12维
+                delta_umax = np.array([0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.2, 0.2, 0.2, 0.2, 0.2, 0.2])
         
-        self.Q = Q
-        self.R = R
-        self.delta_umax = delta_umax
+        self.Q = np.array(Q, dtype=float)
+        self.R = np.array(R, dtype=float)
+        self.delta_umax = np.array(delta_umax, dtype=float)
+        if self.delta_umax.shape[0] != self.Nu_opt:
+            raise ValueError(f"delta_umax维度错误：期望{self.Nu_opt}，实际{self.delta_umax.shape[0]}")
+
+        # R维度校验（对 delta_u_opt）
+        self.R = np.array(self.R, dtype=float)
+        if self.R.shape != (self.Nu_opt, self.Nu_opt):
+            raise ValueError(f"R矩阵维度错误：期望({self.Nu_opt},{self.Nu_opt})，实际{self.R.shape}")
         
         # 构建扩展状态空间模型
         self._build_extended_model()
@@ -904,7 +935,7 @@ class MPCController:
         # self.deepedmd.A 和 self.deepedmd.B 已经在 _load_pytorch_model 中转置过了
         # 所以这里直接使用，不需要再次转置
         a = self.deepedmd.A  # (Nx, Nx) - 模型时间步长的A矩阵
-        b = self.deepedmd.B  # (Nx, Nu) - 模型时间步长的B矩阵
+        b = self.deepedmd.B  # (Nx, Nu_full) - 模型时间步长的B矩阵（全12维）
         
         # ========== 时间步长缩放处理 ==========
         # 如果MPC采样时间是模型时间步长的n倍，需要提升A和B矩阵
@@ -927,17 +958,20 @@ class MPCController:
                 if i < n - 1:  # 最后一次不需要再计算A的幂
                     a_power = a_power @ a
         
-        # 扩展状态: [x_lift; u_prev]
-        # 扩展系统: [x_lift_{k+1}; u_k] = A_ext * [x_lift_k; u_{k-1}] + B_ext * delta_u_k
+        # 扩展状态: [x_lift; u_prev_full]
+        # 扩展系统:
+        #   [x_lift_{k+1}; u_k_full] = A_ext * [x_lift_k; u_{k-1,full}] + B_ext * delta_u_opt
+        # 其中 delta_u_full = B_u_map * delta_u_opt
         # 注意：这里使用提升后的A_mpc和B_mpc，使得每个MPC步对应正确的采样时间
-        A_ext = np.zeros((self.Nx + self.Nu, self.Nx + self.Nu))
+        A_ext = np.zeros((self.Nx + self.Nu_full, self.Nx + self.Nu_full))
         A_ext[:self.Nx, :self.Nx] = a_mpc  # 使用提升后的A矩阵
-        A_ext[:self.Nx, self.Nx:] = b_mpc  # 使用提升后的B矩阵
-        A_ext[self.Nx:, self.Nx:] = np.eye(self.Nu)
-        
-        B_ext = np.zeros((self.Nx + self.Nu, self.Nu))
-        B_ext[:self.Nx, :] = b_mpc  # 使用提升后的B矩阵
-        B_ext[self.Nx:, :] = np.eye(self.Nu)
+        A_ext[:self.Nx, self.Nx:] = b_mpc  # 使用提升后的B矩阵（作用于u_prev_full）
+        A_ext[self.Nx:, self.Nx:] = np.eye(self.Nu_full)
+
+        # B_ext 将 delta_u_opt 映射到提升状态与u_full的更新
+        B_ext = np.zeros((self.Nx + self.Nu_full, self.Nu_opt))
+        B_ext[:self.Nx, :] = b_mpc @ self.B_u_map  # (Nx, Nu_opt)
+        B_ext[self.Nx:, :] = self.B_u_map          # (Nu_full, Nu_opt)
         
         self.A_ext = A_ext
         self.B_ext = B_ext
@@ -946,8 +980,8 @@ class MPCController:
         # C = [eye(state_dim) zeros(state_dim, space_dim - state_dim + Nu)]
         # 其中 space_dim - state_dim + Nu = (Nx - state_dim) + Nu
         # kesi维度是 (Nx + Nu)，C选择前state_dim维（原始状态），后面全0
-        self.C = np.hstack([np.eye(self.deepedmd.s_dim), 
-                           np.zeros((self.deepedmd.s_dim, self.Nx - self.deepedmd.s_dim + self.Nu))])
+        self.C = np.hstack([np.eye(self.deepedmd.s_dim),
+                           np.zeros((self.deepedmd.s_dim, self.Nx - self.deepedmd.s_dim + self.Nu_full))])
     
     def _precompute_prediction_matrices(self):
         """
@@ -973,26 +1007,24 @@ class MPCController:
                 if k <= j:
                     row.append(self.C @ np.linalg.matrix_power(self.A_ext, j - k) @ self.B_ext)
                 else:
-                    row.append(np.zeros((self.deepedmd.s_dim, self.Nu)))
+                    row.append(np.zeros((self.deepedmd.s_dim, self.Nu_opt)))
             THETA_list.append(np.hstack(row))
-        self.THETA = np.vstack(THETA_list)  # (Np*state_dim) x (Nc*Nu)
+        self.THETA = np.vstack(THETA_list)  # (Np*state_dim) x (Nc*Nu_opt)
     
     def _build_constraints(self):
         """构建约束矩阵，并预计算H和A_combined矩阵"""
-        # 控制输入约束矩阵A_l（累积约束）
-        A_l = np.zeros((self.Nc, self.Nc))
-        for p in range(self.Nc):
-            for q in range(self.Nc):
-                if q <= p:
-                    A_l[p, q] = 1
-        
-        self.A_l = np.kron(A_l, np.eye(self.Nu))  # (Nc*Nu) x (Nc*Nu)
-        
-        # 控制输入边界（归一化范围[0, 1]）
-        umin = np.zeros(self.Nu)  # [0, 0, ..., 0]
-        umax = np.ones(self.Nu)   # [1, 1, ..., 1]
-        self.Umin = np.kron(np.ones(self.Nc), umin)
-        self.Umax = np.kron(np.ones(self.Nc), umax)
+        # ========= 绝对控制约束（作用于全12维 u_full） =========
+        # 由于优化变量是 delta_u_opt（Nu_opt维），需要通过 B_u_map 将增量累积映射到 u_full
+        # u_full(k) = u_prev_full + sum_{i<=k} (B_u_map * delta_u_opt(i))
+        # 因此 A_l_full = kron(tril(ones(Nc)), B_u_map)，形状：(Nc*Nu_full) x (Nc*Nu_opt)
+        A_l = np.tril(np.ones((self.Nc, self.Nc)))
+        self.A_l_full = np.kron(A_l, self.B_u_map)  # (Nc*Nu_full) x (Nc*Nu_opt)
+
+        # 控制输入边界（归一化范围[0, 1]，作用于全12维）
+        umin_full = np.zeros(self.Nu_full)
+        umax_full = np.ones(self.Nu_full)
+        self.Umin = np.kron(np.ones(self.Nc), umin_full)
+        self.Umax = np.kron(np.ones(self.Nc), umax_full)
         
         # 控制增量边界
         delta_umin = -self.delta_umax
@@ -1005,7 +1037,7 @@ class MPCController:
         Q_kron = np.kron(np.eye(self.Np), self.Q)
         R_kron = np.kron(np.eye(self.Nc), self.R)
         H_11 = 2 * (self.THETA.T @ Q_kron @ self.THETA) + R_kron
-        H_12 = np.zeros((self.Nc * self.Nu, 1))
+        H_12 = np.zeros((self.Nc * self.Nu_opt, 1))
         H_22 = np.array([[100.0]])  # 松弛因子
         H = np.block([[H_11, H_12], [H_12.T, H_22]])
         H = (H + H.T) / 2  # 确保对称
@@ -1025,12 +1057,12 @@ class MPCController:
         self.Q_kron = Q_kron
         
         # ========== 优化2: 预计算A_combined矩阵 ==========
-        # A_combined的结构是固定的，只依赖于A_l
-        n_vars = self.Nc * self.Nu + 1  # 变量数量：[delta_U; slack]
+        # A_combined的结构是固定的，只依赖于A_l_full
+        n_vars = self.Nc * self.Nu_opt + 1  # 变量数量：[delta_U_opt; slack]
         
         # 构建A_ineq（结构固定）
-        A_ineq_1 = np.hstack([self.A_l, np.zeros((self.Nc * self.Nu, 1))])
-        A_ineq_2 = np.hstack([-self.A_l, np.zeros((self.Nc * self.Nu, 1))])
+        A_ineq_1 = np.hstack([self.A_l_full, np.zeros((self.Nc * self.Nu_full, 1))])
+        A_ineq_2 = np.hstack([-self.A_l_full, np.zeros((self.Nc * self.Nu_full, 1))])
         A_ineq = np.vstack([A_ineq_1, A_ineq_2])
         
         # 转换为稀疏矩阵
@@ -1084,14 +1116,17 @@ class MPCController:
         
         Args:
             x_lift: 当前提升状态 [space_dim]
-            u_prev: 上一时刻控制输入 [control_dim]
-            ref_traj: 参考轨迹 [Np, state_dim]（归一化后的局部状态）
+            u_prev: 上一时刻控制输入 [control_dim_full]（归一化，范围[0, 1]，12维）
+                    注意：本项目控制量使用CONTROL_MIN/MAX做min-max归一化，
+                    因此 u_prev≈0.5 对应“零转矩/零转角”，u_prev=0 对应最小转矩/最小转角
+            ref_traj: 参考轨迹 [Np, state_dim]（应与模型训练使用的坐标系/单位一致；本项目通常为全局坐标SI单位）
         
         Returns:
             delta_u: 控制增量 [control_dim]
             success: 是否求解成功
         """
         # 构建扩展状态
+        # u_prev进入扩展状态的是全12维 u_full
         kesi = np.concatenate([x_lift, u_prev])
         
         # 构建参考轨迹向量（对应MATLAB: reshape(ref_r', [state_dim * Np, 1])）
@@ -1139,6 +1174,7 @@ class MPCController:
         # ========== 约束: A_ineq * x <= b_ineq ==========
         # A_combined已经在_build_constraints()中预计算（优化2）
         # 只需要计算b_ineq（依赖于u_prev，每次都在变化）
+        # 绝对控制约束作用于全12维 u_full
         Ut = np.kron(np.ones(self.Nc), u_prev)
         b_ineq_1 = self.Umax - Ut
         b_ineq_2 = -self.Umin + Ut
@@ -1153,8 +1189,14 @@ class MPCController:
         # 检查并调整边界，确保约束可行
         # 对于每个控制输入维度，需要调整所有Nc步中该维度的边界
         # 归一化范围[0, 1]
-        for i in range(self.Nu):
-            u_prev_i = u_prev[i]
+        # 动态边界调整：仅对低维 delta_u_opt 做保护（避免在极端情况下不可行）
+        # i=0：扭矩标量（取前6维均值），i=1：前轮转角标量（取前轮两侧均值）
+        u_prev_torque = float(np.mean(u_prev[:6])) if len(u_prev) >= 6 else 0.5
+        u_prev_steer = float(np.mean(u_prev[6:8])) if len(u_prev) >= 8 else 0.5
+        u_prev_opt = np.array([u_prev_torque, u_prev_steer], dtype=float) if self.Nu_opt == 2 else None
+
+        for i in range(self.Nu_opt):
+            u_prev_i = float(u_prev_opt[i]) if u_prev_opt is not None else float(u_prev[i])
             
             # 如果u_prev接近下界，限制delta_u不能为负（或只能很小的负值）
             if u_prev_i <= 0.05:  # 接近下界0
@@ -1162,7 +1204,7 @@ class MPCController:
                 min_delta = -u_prev_i + 1e-6  # 添加小的安全裕度
                 # 调整所有Nc步中第i个控制输入维度的下界
                 for k in range(self.Nc):
-                    idx = k * self.Nu + i
+                    idx = k * self.Nu_opt + i
                     lb[idx] = max(lb[idx], min_delta)
             # 如果u_prev接近上界，限制delta_u不能为正
             elif u_prev_i >= 0.95:  # 接近上界1
@@ -1170,7 +1212,7 @@ class MPCController:
                 max_delta = (1.0 - u_prev_i) - 1e-6  # 添加小的安全裕度
                 # 调整所有Nc步中第i个控制输入维度的上界
                 for k in range(self.Nc):
-                    idx = k * self.Nu + i
+                    idx = k * self.Nu_opt + i
                     ub[idx] = min(ub[idx], max_delta)
         
         # 确保lb <= ub（避免无效约束）
@@ -1182,9 +1224,8 @@ class MPCController:
                 ub[i] = mid + 1e-6
                 
                 # 对于控制增量维度（前Nc*Nu个元素），确保在合理范围内
-                if i < self.Nc * self.Nu:
-                    # 确定是哪个控制输入维度
-                    dim_idx = i % self.Nu
+                if i < self.Nc * self.Nu_opt:
+                    dim_idx = i % self.Nu_opt
                     # 控制增量维度，限制在[-delta_umax, delta_umax]内
                     lb[i] = max(lb[i], -self.delta_umax[dim_idx])
                     ub[i] = min(ub[i], self.delta_umax[dim_idx])
@@ -1245,7 +1286,7 @@ class MPCController:
             # 检查求解状态
             if result.info.status in ['solved', 'solved inaccurate']:
                 X = result.x
-                delta_u = X[:self.Nu]
+                delta_u = X[:self.Nu_opt]
                 return delta_u, True
             else:
                 # OSQP失败，尝试quadprog
@@ -1273,8 +1314,8 @@ class MPCController:
                 
                 # 构建约束矩阵 C^T * x >= b
                 # 约束1: A_ineq * x <= b_ineq  -> -A_ineq * x >= -b_ineq
-                A_ineq_1 = np.hstack([self.A_l, np.zeros((self.Nc * self.Nu, 1))])
-                A_ineq_2 = np.hstack([-self.A_l, np.zeros((self.Nc * self.Nu, 1))])
+                A_ineq_1 = np.hstack([self.A_l_full, np.zeros((self.Nc * self.Nu_full, 1))])
+                A_ineq_2 = np.hstack([-self.A_l_full, np.zeros((self.Nc * self.Nu_full, 1))])
                 A_ineq = np.vstack([A_ineq_1, A_ineq_2])
                 
                 # 约束2: x >= lb  -> I * x >= lb
@@ -1392,7 +1433,7 @@ class MPCController:
                         exitflag = exitflag.item() if exitflag.size == 1 else exitflag[0]
                     
                     if exitflag == 0:  # quadprog成功
-                        delta_u = X[:self.Nu]
+                        delta_u = X[:self.Nu_opt]
                         return delta_u, True
                     else:
                         # quadprog失败
@@ -1410,7 +1451,7 @@ class MPCController:
                 else:
                     print(f"[MPC] quadprog failed: {e2}")
                 print(f"[MPC] 返回零控制增量，u_prev={u_prev}")
-                return np.zeros(self.Nu), False
+                return np.zeros(self.Nu_opt), False
     
     def convert_to_control_output(self, u_normalized: np.ndarray) -> np.ndarray:
         """

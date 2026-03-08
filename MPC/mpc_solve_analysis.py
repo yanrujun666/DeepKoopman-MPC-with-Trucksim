@@ -41,19 +41,22 @@ class MPCSolveAnalyzer:
         
         # MPC参数(应用短期优化方案以改善数值稳定性)
         # 1. 减小预测时域Np：从30减小到20，降低PHI和THETA矩阵条件数
-        Np = 3
-        Nc = 3  # 控制时域也相应减小
+        Np = 30
+        Nc = 30  # 控制时域也相应减小
         sample_interval = 5
         model_dt = 0.01
         mpc_dt = float(sample_interval) * model_dt
         
-        # Q = np.diag([20, 1000, 1000, 1000, 20, 20])
-        Q = np.diag([1,1,1,1,1,1])
+        # Q：状态跟踪权重（6维：[X, Y, Yaw, vx, vy, yaw_rate]）
+        # 目标：速度(vx)优先，同时整体更平顺
+        Q = np.diag([20, 80, 120, 300, 40, 40])
         # 2. 增加控制权重R：转矩权重从5增加到50，改善H矩阵条件数
-        # R = np.diag([50, 50, 50, 50, 50, 50, 10000, 10000, 10000, 10000, 10000, 10000])
-        R = np.diag([1,1,1,1,1,1,1,1,1,1,1,1])
-        # delta_umax = np.array([0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.2, 0.2, 0.2, 0.2, 0.2, 0.2])
-        delta_umax = np.array([0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1])
+        # R：控制增量权重（12维：[6转矩, 6转向角]）
+        # 目标：转矩更平滑（更大增量惩罚），转向更昂贵避免抖动
+        R = np.diag([800, 800, 800, 800, 800, 800, 12000, 12000, 12000, 12000, 12000, 12000])
+        # delta_umax：单步控制增量上限（归一化）
+        # 转矩：0.05（≈150N·m/步），转向：0.02（≈3.6deg/步）
+        delta_umax = np.array([0.05, 0.05, 0.05, 0.05, 0.05, 0.05, 0.02, 0.02, 0.02, 0.02, 0.02, 0.02])
         
         self.mpc = MPCController(
             self.deepedmd,
@@ -404,7 +407,9 @@ class MPCSolveAnalyzer:
         
         # 初始化控制输入
         if u_prev is None:
-            u_prev = np.zeros(12)  # 12维控制
+            # 注意：本项目控制量采用CONTROL_MIN/MAX做min-max归一化
+            # 因此 u=0.5 对应“零转矩/零转角”（控制量区间中心）
+            u_prev = 0.5 * np.ones(12)  # 12维控制（归一化）
         
         # 记录分析结果
         analysis_result = {
@@ -1018,7 +1023,8 @@ def main():
     ])
     
     nearest_idx = 1
-    u_prev = np.zeros(12)  # 初始控制输入为零
+    # 初始控制输入（归一化）：0.5 对应零转矩/零转角
+    u_prev = 0.5 * np.ones(12)
     
     # 执行分析
     analysis_result = analyzer.analyze_first_step(state_input, nearest_idx, u_prev)

@@ -96,7 +96,8 @@ def find_nearest_point(ref_traj, current_state, start_idx, search_range):
     return nearest_idx, min_distance
 
 
-def initialize_controller(param_path, data_path, Np=30, Nc=30, sample_interval=1, decimation=10):
+def initialize_controller(param_path, data_path, Np=30, Nc=30, sample_interval=1, decimation=10,
+                          q_weights=None, r_weights=None, i_weights=None):
     """
     初始化 MPC 控制器（方案 A：新网络 + 新 KoopmanMPC）
     Args:
@@ -104,8 +105,11 @@ def initialize_controller(param_path, data_path, Np=30, Nc=30, sample_interval=1
         data_path: 参考轨迹 .mat 路径
         Np: 预测时域（与 horizon 一致，默认 30）
         Nc: 未使用（保留接口兼容）
-        sample_interval: 参考轨迹采样间隔（1=与 Koopman 0.01s 对齐，ref_traj_np[k] 与 z[k+1] 时间一致）
-        decimation: 每 decimation 次调用求解一次 MPC（10 -> 10ms，与 new code 对齐）
+        sample_interval: 参考轨迹采样间隔（1=与 Koopman 0.01s 对齐）
+        decimation: 每 decimation 次调用求解一次 MPC
+        q_weights: 可选，Q 权重 [16]（状态/跟踪），从 MATLAB 传入时为 list/array，None 用默认
+        r_weights: 可选，R 权重 [12]（控制-中性），None 用默认
+        i_weights: 可选，I 权重 [12]（控制增量/平滑），None 用默认
     """
     global _controller_state
     import torch
@@ -119,6 +123,27 @@ def initialize_controller(param_path, data_path, Np=30, Nc=30, sample_interval=1
     encoder, dkm = load_model(param_path, device=device)
     _controller_state['encoder'] = encoder
     _controller_state['dkm'] = dkm
+
+    # 将 MATLAB 传入的 Q/R/I 转为 torch（若为 None 或空则 KoopmanMPC 内用默认）
+    def _to_tensor_optional(arr, default=None):
+        if arr is None:
+            return default
+        try:
+            n = len(arr)
+        except TypeError:
+            return default
+        if n == 0:
+            return default
+        try:
+            a = np.array(arr).flatten().astype(np.float64)
+        except Exception:
+            return default
+        return torch.tensor(a, dtype=torch.float32, device=device)
+
+    q_t = _to_tensor_optional(q_weights)
+    r_t = _to_tensor_optional(r_weights)
+    i_t = _to_tensor_optional(i_weights)
+
     _controller_state['mpc'] = KoopmanMPC(
         dkm,
         state_dim=6,
@@ -126,6 +151,9 @@ def initialize_controller(param_path, data_path, Np=30, Nc=30, sample_interval=1
         horizon=int(Np),
         control_min_np=CONTROL_MIN_NP,
         control_max_np=CONTROL_MAX_NP,
+        q_weights=q_t,
+        r_weights=r_t,
+        i_weights=i_t,
         device=device,
     )
 
@@ -371,7 +399,25 @@ def initialize_controller(param_path, data_path, Np=30, Nc=30, sample_interval=1
     recommended_steps = max(0, ref_traj_len - trajectory_end_threshold)
     recommended_sim_time = recommended_steps * 0.01  # 10ms 步长对齐
 
-    print(f"[Python S-Function] 初始化完成 (Koopman-MPC V2)")
+    # -------- 仿真超参数配置（开头打印，便于复现与调试）--------
+    mpc = _controller_state['mpc']
+    q_np = mpc.q_weights.detach().cpu().numpy()
+    r_np = mpc.r_weights.detach().cpu().numpy()
+    i_np = mpc.i_weights.detach().cpu().numpy()
+    cmin, cmax = CONTROL_MIN_NP, CONTROL_MAX_NP
+    print("\n[仿真超参数] Koopman-MPC V2 本次仿真配置:")
+    print("  时域与采样: Np=%s, Nc=%s, horizon=%s, sample_interval=%s, decimation=%s"
+          % (Np, Nc, mpc.horizon, _controller_state['sample_interval'], _controller_state['decimation']))
+    print("  Q (状态/跟踪权重): diag 前6维=%s, 后10维=%s, 范数=%.4f"
+          % (q_np[:6].round(4).tolist(), q_np[6:].round(4).tolist(), float(np.linalg.norm(q_np))))
+    print("  R (控制-中性惩罚): diag 前6(转矩)=%s, 后6(转向)=%s, 范数=%.4f"
+          % (r_np[:6].round(4).tolist(), r_np[6:].round(4).tolist(), float(np.linalg.norm(r_np))))
+    print("  I (控制增量/平滑): diag 前6(转矩)=%s, 后6(转向)=%s, 范数=%.4f"
+          % (i_np[:6].round(4).tolist(), i_np[6:].round(4).tolist(), float(np.linalg.norm(i_np))))
+    print("  控制边界(物理): 转矩 [%.0f, %.0f] N·m, 转向 [%.2f, %.2f] deg"
+          % (cmin[0], cmax[0], cmin[6] * 180 / np.pi, cmax[6] * 180 / np.pi))
+
+    print(f"\n[Python S-Function] 初始化完成 (Koopman-MPC V2)")
     print(f"  参考轨迹长度: {ref_traj_len}, Np={Np}, sample_interval={sample_interval}")
     print(f"  控制抽取倍率: decimation={_controller_state['decimation']} (每{_controller_state['decimation']}次调用求解一次MPC)")
     print(f"  推荐仿真时间: {recommended_sim_time:.1f}秒")

@@ -46,9 +46,18 @@ if isempty(is_initialized)
     % 参考轨迹 .mat（支持 ref_trajectory / position+velocity / Pos+X 格式）
     data_path = 'D:\YRJ_Workspace\DDK-Trucksim-python\data\ref_traj\all\all_wheel_steer_Scenario_snake_acc_5m_s_ref.mat';
     
-    % 初始化 Koopman-MPC V2：param_path, data_path, Np=30, Nc=30, sample_interval=1, decimation=10
+    % ---------- Q / R / I 超参数（可选，传入 Python 用于 MPC 代价权重）----------
+    % Q: 状态/跟踪权重 [16]，前 6 维为物理状态 (x,y,yaw,vx,vy,wz)，后 10 维为 Koopman 提升维
+    Q = [ones(6,1); ones(10,1)];   % 默认全 1；可改为标量或逐维
+    % R: 控制偏离中性(0.5)的惩罚 [12]，前 6 转矩、后 6 转向
+    R = 0.01 * ones(12, 1);        % 默认 0.01；增大可更保守
+    % I: 控制增量/平滑惩罚 [12]
+    I = 1.5 * ones(12, 1);         % 默认 0.5；增大可减轻抖动
+    % 若希望使用 Python 端默认值，可将 Q、R、I 任一设为 []，例如: Q=[]; R=[]; I=[];
+    
+    % 初始化 Koopman-MPC V2：param_path, data_path, Np, Nc, sample_interval, decimation, Q, R, I
     % sample_interval=1 与 Koopman 0.01s 对齐；decimation=10 表示每 10 次调用求解一次 MPC
-    py.ddk_mpc_sfunction.initialize_controller(param_path, data_path, 30, 30, 1, 10);
+    py.ddk_mpc_sfunction.initialize_controller(param_path, data_path, 30, 30, 1, 10, Q, R, I);
     % 为避免Python侧全局状态在多次仿真间残留，初始化后显式重置一次状态
     % 重要：Python侧u_prev为“归一化控制”，应以0.5作为零转矩/零转角的初始值
     py.ddk_mpc_sfunction.reset_controller();

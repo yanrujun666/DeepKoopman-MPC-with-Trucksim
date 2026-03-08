@@ -73,7 +73,7 @@ _controller_state = {
     'Np': 30,
     'u_init_prev': None,
     'u_last_output': None,   # 用于输出平滑的上一拍实际下发控制（归一化 [0,1]^12）
-    'smooth_alpha': 0.45,    # 输出一阶滤波系数：u_out = alpha*u_last + (1-alpha)*u_mpc，越大越平滑
+    'trajectory_csv_path': None,  # 仿真过程中记录实车 xy 轨迹的 CSV 路径，供 scripts 绘图
 }
 
 
@@ -354,6 +354,18 @@ def initialize_controller(param_path, data_path, Np=30, Nc=30, sample_interval=1
     if old_index > 0:
         print(f"[Python S-Function] 警告：检测到之前的状态 (index={old_index})，已重置为0")
 
+    # 实车轨迹记录 CSV：仿真过程中每步追加 (step, x, y)，供 scripts 与参考轨迹对比绘图
+    _project_root = os.path.dirname(_module_dir)
+    _data_dir = os.path.join(_project_root, 'data', 'exp_traj_log')
+    os.makedirs(_data_dir, exist_ok=True)
+    _controller_state['trajectory_csv_path'] = os.path.join(_data_dir, 'vehicle_trajectory_log.csv')
+    try:
+        with open(_controller_state['trajectory_csv_path'], 'w', encoding='utf-8') as f:
+            f.write('step,x,y\n')
+        print(f"[Python S-Function] 实车轨迹将记录到: {_controller_state['trajectory_csv_path']}")
+    except Exception as e:
+        print(f"[Python S-Function] 警告：无法创建轨迹 CSV: {e}")
+
     ref_traj_len = len(_controller_state['ref_traj'])
     trajectory_end_threshold = int(Np * sample_interval + 200)
     recommended_steps = max(0, ref_traj_len - trajectory_end_threshold)
@@ -407,6 +419,15 @@ def compute_control(state_input):
 
         _controller_state['index'] += 1
         call_idx = int(_controller_state['index'])
+        # 每步记录实车 x,y 到 CSV，供仿真结束后 scripts 绘图对比
+        _csv_path = _controller_state.get('trajectory_csv_path')
+        if _csv_path:
+            try:
+                with open(_csv_path, 'a', encoding='utf-8') as f:
+                    f.write(f"{call_idx},{x_cur[0]:.6f},{x_cur[1]:.6f}\n")
+            except Exception:
+                pass
+
         decimation = int(_controller_state.get('decimation', 10))
         if decimation <= 0:
             decimation = 10

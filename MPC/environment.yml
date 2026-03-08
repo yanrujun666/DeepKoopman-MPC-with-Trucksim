@@ -1,0 +1,21 @@
+# Conda 环境：MPC 控制（Simulink/Trucksim 闭环）所需依赖
+# 使用：conda env create -f MPC/environment.yml
+# 激活：conda activate mpc-control
+# 注意：创建后需让 MATLAB 指向此环境的 Python 解释器
+
+name: mpc-control
+
+channels:
+  - pytorch
+  - conda-forge
+  - defaults
+
+dependencies:
+  - python>=3.8,<3.13
+  # NumPy 1.x，与当前 PyTorch ABI 兼容（NumPy 2.x 会触发 RuntimeError: Numpy is not available）
+  - "numpy>=1.20,<2"
+  - scipy
+  - pytorch
+  - pip
+  - pip:
+    - cvxpy

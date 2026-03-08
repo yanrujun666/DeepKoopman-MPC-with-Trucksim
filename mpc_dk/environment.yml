@@ -1,0 +1,15 @@
+name: mpc_koopman
+channels:
+  - defaults
+dependencies:
+  - python=3.9
+  - numpy
+  - scipy
+  - pytorch
+  - cudatoolkit=11.3
+  - matplotlib
+  - tqdm
+  - pip
+  - pip:
+      - cvxpy
+

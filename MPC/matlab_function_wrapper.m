@@ -1,6 +1,5 @@
 % MATLAB Function模块包装器
-% 用于在Simulink中调用Python MPC控制器
-% 支持PyTorch模型（.pth格式）和MATLAB模型（.mat/.pkl格式）
+% 用于在Simulink中调用Python MPC控制器（Koopman-MPC V2：新网络 + 新MPC）
 %
 % 使用方法：
 % 1. 在Simulink中添加"MATLAB Function"块
@@ -11,20 +10,14 @@
 
 function control_output = ddk_mpc_matlab_function(state_input)
 %#codegen
-% DeepEDMD-MPC控制器MATLAB Function包装器（Trucksim版本）
-% 支持12维控制输出（6个转向角 + 6个转矩）
-% 仅支持.pth格式模型文件
+% Koopman-MPC V2 控制器 MATLAB Function 包装器（Trucksim）
+% 新 ckpt：CustomEncoderUnscaledv2WithoutNorm + KoopmanMPC（12维控制、硬约束）
 %
 % 输入:
-%   state_input: [6x1] 车辆状态 [X(m), Y(m), Yaw(rad), vx(m/s), vy(m/s), yaw_rate(rad/s)]
-%                Trucksim输出已经是国际标准单位，无需转换
+%   state_input: [6x1] 车辆状态（相对起点）[X(m), Y(m), Yaw(rad), vx(m/s), vy(m/s), yaw_rate(rad/s)]
 %
 % 输出:
-%   control_output: [12x1] 控制信号
-%      [steer_LF(deg), steer_RF(deg), steer_LM(deg), steer_RM(deg), 
-%       steer_LR(deg), steer_RR(deg),
-%       torque_LF(N·m), torque_RF(N·m), torque_LM(N·m), torque_RM(N·m),
-%       torque_LR(N·m), torque_RR(N·m)]
+%   control_output: [12x1] [steer_LF..RR(deg), torque_LF..RR(N·m)]
 
 % 显式声明输入输出大小（帮助代码生成器确定维度）
 assert(isequal(size(state_input), [6, 1]), 'state_input must be 6x1');
@@ -47,25 +40,15 @@ persistent data_path;
 if isempty(is_initialized)
     is_initialized = false;
     
-    % 设置路径（根据实际情况修改）
-    % 仅支持PyTorch模型（.pth格式），使用Transformer编码器
-    % 示例：'D:\YRJ_Workspace\DDK-Trucksim-python\DeepEDMD\ckpt\DeepEDMD-Transv2-hd16-multiset-100e.pth'
+    % 新 ckpt 路径（与 mpc_dk 一致，项目根下 ckpt 文件夹）
+    param_path = 'D:\YRJ_Workspace\DDK-Trucksim-python\ckpt\DeepEDMD-Transv2wonorm-hd16-multiset-100e-remote-local-lr1e-4-rollover-0.05pilossv24-0222.pth';
     
-    % TODO: 更新为Trucksim参数文件路径（必须是.pth格式）
-    param_path = 'D:\YRJ_Workspace\DDK-Trucksim-python\DeepEDMD\ckpt\DeepEDMD-Transv2-hd16-multiset-100e-remote.pth';
+    % 参考轨迹 .mat（支持 ref_trajectory / position+velocity / Pos+X 格式）
+    data_path = 'D:\YRJ_Workspace\DDK-Trucksim-python\data\ref_traj\all\all_wheel_steer_Scenario_snake_acc_5m_s_ref.mat';
     
-    % TODO: 更新为Trucksim参考轨迹数据文件路径
-    % 数据文件应包含 'position' 和 'velocity' 字段（或 'Pos' 和 'X' 字段）
-    % data_path = "D:\YRJ_Workspace\DDK-Trucksim-python\TrucksimDatasets\all\all_wheel_steer_Scenario_snake_acc_5m_s.mat";
-    % data_path = 'D:\YRJ_Workspace\DDK-Trucksim-python\MPC\ref_trajectory\snake_trajectory_ref.mat';
-    data_path = 'D:\YRJ_Workspace\DDK-Trucksim-python\MPC\ref_trajectory\straight_acceleration_trajectory_ref.mat';
-    
-    % 初始化Python控制器
-    % 参数：param_path, data_path, Np=30, Nc=30, sample_interval=5
-    % Np: 预测时域（步数）
-    % Nc: 控制时域（步数）
-    % sample_interval: 采样间隔（用于参考轨迹提取）
-    py.ddk_mpc_sfunction.initialize_controller(param_path, data_path, 30, 30, 5);
+    % 初始化 Koopman-MPC V2：param_path, data_path, Np=30, Nc=30, sample_interval=1, decimation=10
+    % sample_interval=1 与 Koopman 0.01s 对齐；decimation=10 表示每 10 次调用求解一次 MPC
+    py.ddk_mpc_sfunction.initialize_controller(param_path, data_path, 30, 30, 1, 10);
     % 为避免Python侧全局状态在多次仿真间残留，初始化后显式重置一次状态
     % 重要：Python侧u_prev为“归一化控制”，应以0.5作为零转矩/零转角的初始值
     py.ddk_mpc_sfunction.reset_controller();

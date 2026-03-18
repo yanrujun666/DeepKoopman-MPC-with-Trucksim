@@ -392,7 +392,11 @@ class KoopmanMPC(nn.Module):
             constraints += [d_RL + d_FL == self.steer_opposite_sum_norm, d_RR + d_FR == self.steer_opposite_sum_norm]
 
         cost = 0
-        u_neutral_np = np.ones(m, dtype=np.float64) * 0.5
+        if u_init_np is not None:
+            u_neutral_np = u_init_np
+        else:
+            u_neutral_np = np.ones(m, dtype=np.float64) * 0.5
+       
         for k in range(H):
             cost += cp.quad_form(z[k + 1, :] - ref_traj_np[k], Q)
             cost += cp.quad_form(u[k, :] - u_neutral_np, R)

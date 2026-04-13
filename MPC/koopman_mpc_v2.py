@@ -396,12 +396,17 @@ class KoopmanMPC(nn.Module):
             u_neutral_np = u_init_np
         else:
             u_neutral_np = np.ones(m, dtype=np.float64) * 0.5
+            R = R * 0.01
        
+        # average tracking error
         for k in range(H):
-            cost += cp.quad_form(z[k + 1, :] - ref_traj_np[k], Q)
-            cost += cp.quad_form(u[k, :] - u_neutral_np, R)
+            cost += cp.quad_form(z[k + 1, :] - ref_traj_np[k], Q) / H
+            cost += cp.quad_form(u[k, :] - u_neutral_np, R) / H
+        # final tracking error
+        cost += cp.quad_form(z[-1, :] - ref_traj_np[-1, :], Q)
+        # control increment
         for k in range(1, H):
-            cost += cp.quad_form(u[k, :] - u[k - 1, :], I)
+            cost += cp.quad_form(u[k, :] - u[k - 1, :], I) / (H - 1)
         prob = cp.Problem(cp.Minimize(cost), constraints)
         if u_init_np is not None:
             u.value = u_init_np

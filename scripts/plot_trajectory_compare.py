@@ -19,7 +19,7 @@ import numpy as np
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DEFAULT_CSV = os.path.join(ROOT, "data", "exp_traj_log", "vehicle_trajectory_log.csv")
-DEFAULT_REF = os.path.join(ROOT, "data", "ref_traj", "all", "all_wheel_steer_Scenario_snake_acc_5m_s_ref.mat")
+DEFAULT_REF = os.path.join(ROOT, "data", "ref_traj", "all", "all_wheel_steer_Scenario_snake_const_5m_s_long_ref.mat")
 
 
 def load_vehicle_csv(csv_path: str):
@@ -299,10 +299,10 @@ def main():
     if args.out:
         out_path = os.path.normpath(os.path.join(ROOT, args.out)) if not os.path.isabs(args.out) else args.out
         os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
-        plt.savefig(out_path, dpi=150, bbox_inches="tight")
+        fig.savefig(out_path, dpi=150, bbox_inches="tight")
         print(f"已保存: {out_path}")
     else:
-        plt.show()
+        fig.show()
 
 
 if __name__ == "__main__":

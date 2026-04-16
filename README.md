@@ -87,4 +87,4 @@ Python **3.9+** with `numpy`, `scipy`, `torch`, `cvxpy`; `matplotlib` for script
 
 ## License
 
-Add your license and citation when distributing the project.
+This project is licensed under the MIT License. See the `LICENSE` file for details.
